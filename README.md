@@ -17,11 +17,18 @@ It deliberately does **not** depend on Taichi (or any other heavy runtime) at ru
 ## Two examples, smallest first
 
 - **`examples/relativity_pygame_sdl3_compute_minimal.py`** — the core proof point in its simplest form: a real GPU compute dispatch (a parallel per-point sine-wave kernel, authored in the DSL) running every frame, its output read back and drawn with ordinary `pygame.draw.circle` calls, in the same window, same frame.
+
+  ![Compute-minimal demo: a sine wave computed on the GPU each frame, drawn with pygame.draw.circle](media/compute_minimal.gif)
+
 - **`examples/relativity_bvh_demo.py`** — a substantially more ambitious real workload: a Karras binary-radix-tree BVH build and primary-ray GPU traversal, entirely authored in the DSL, interactively camera-controlled.
+
+  ![BVH demo: a Karras-tree BVH built and ray-traced entirely in the kernel DSL, camera orbiting the scene](media/bvh_demo.gif)
 
 A third example is included too, though it's a **separate achievement, not DSL-authored**:
 
 - **`examples/relativity_pygame_planet_showcase_minimal.py`** — a procedural rocky planet (an altitude-banded biome surface) with a real ray-marched Rayleigh/Mie atmosphere layered on top, composited onto an ordinary pygame window every frame. `planet_surface.frag`/`atmosphere.frag` are hand-written GLSL, compiled through the same glslang → spirv-cross → SDL3/MSL toolchain, but independent of the `.rfrk` compiler. Included because it's a more visually concrete demonstration of the same underlying "GPU shaders + pygame coexist" story.
+
+  ![Planet showcase demo: a biome-ladder rocky planet with a ray-marched atmosphere, rotating](media/planet_showcase.gif)
 
 ## Getting started
 
