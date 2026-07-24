@@ -1,0 +1,155 @@
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct UBO
+{
+    float temperature;
+    float starRadius;
+    float doppler;
+    float brightness;
+    float rotationPhase;
+    float seed;
+};
+
+struct main0_out
+{
+    float4 frag_color [[color(0)]];
+};
+
+struct main0_in
+{
+    float2 v_uv [[user(locn0)]];
+};
+
+static inline __attribute__((always_inline))
+float3 blackbody(thread const float& T)
+{
+    float t = fast::clamp(T / 40000.0, 0.0, 1.0);
+    float3 cool = float3(1.0, 0.3499999940395355224609375, 0.100000001490116119384765625);
+    float3 mid = float3(1.0, 0.949999988079071044921875, 0.85000002384185791015625);
+    float3 hot = float3(0.64999997615814208984375, 0.75, 1.0);
+    float3 _47;
+    if (t < 0.5)
+    {
+        _47 = mix(cool, mid, float3(t * 2.0));
+    }
+    else
+    {
+        _47 = mix(mid, hot, float3((t - 0.5) * 2.0));
+    }
+    return _47;
+}
+
+static inline __attribute__((always_inline))
+float hash3(thread float3& p)
+{
+    p = fract((p * 0.31830990314483642578125) + float3(0.100000001490116119384765625, 0.20000000298023223876953125, 0.300000011920928955078125));
+    p *= 17.0;
+    return fract(((p.x * p.y) * p.z) * ((p.x + p.y) + p.z));
+}
+
+static inline __attribute__((always_inline))
+float noise3d(thread const float3& p)
+{
+    float3 i = floor(p);
+    float3 f = fract(p);
+    float3 u = (f * f) * (float3(3.0) - (f * 2.0));
+    float3 param = i + float3(0.0);
+    float _124 = hash3(param);
+    float n000 = _124;
+    float3 param_1 = i + float3(1.0, 0.0, 0.0);
+    float _130 = hash3(param_1);
+    float n100 = _130;
+    float3 param_2 = i + float3(0.0, 1.0, 0.0);
+    float _136 = hash3(param_2);
+    float n010 = _136;
+    float3 param_3 = i + float3(1.0, 1.0, 0.0);
+    float _142 = hash3(param_3);
+    float n110 = _142;
+    float3 param_4 = i + float3(0.0, 0.0, 1.0);
+    float _148 = hash3(param_4);
+    float n001 = _148;
+    float3 param_5 = i + float3(1.0, 0.0, 1.0);
+    float _154 = hash3(param_5);
+    float n101 = _154;
+    float3 param_6 = i + float3(0.0, 1.0, 1.0);
+    float _160 = hash3(param_6);
+    float n011 = _160;
+    float3 param_7 = i + float3(1.0);
+    float _166 = hash3(param_7);
+    float n111 = _166;
+    float nx00 = mix(n000, n100, u.x);
+    float nx10 = mix(n010, n110, u.x);
+    float nx01 = mix(n001, n101, u.x);
+    float nx11 = mix(n011, n111, u.x);
+    float nxy0 = mix(nx00, nx10, u.y);
+    float nxy1 = mix(nx01, nx11, u.y);
+    return mix(nxy0, nxy1, u.z);
+}
+
+static inline __attribute__((always_inline))
+float fbm(thread const float3& p)
+{
+    float value = 0.0;
+    float amp = 0.5;
+    float freq = 1.0;
+    for (int i = 0; i < 4; i++)
+    {
+        float3 param = p * freq;
+        value += (amp * noise3d(param));
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    return value;
+}
+
+fragment main0_out main0(main0_in in [[stage_in]], constant UBO& ubo [[buffer(0)]])
+{
+    main0_out out = {};
+    float2 uv = (in.v_uv * 2.0) - float2(1.0);
+    float r = fast::max(ubo.starRadius, 0.001000000047497451305389404296875);
+    float param = ubo.temperature;
+    float3 base_color = blackbody(param);
+    float3 ray_origin = float3(0.0, 0.0, -3.0);
+    float3 ray_dir = fast::normalize(float3(uv, 1.5));
+    float b = dot(ray_origin, ray_dir);
+    float c = dot(ray_origin, ray_origin) - (r * r);
+    float disc = (b * b) - c;
+    float3 color = float3(0.0);
+    float disk_alpha = 0.0;
+    if (disc >= 0.0)
+    {
+        float t = (-b) - sqrt(disc);
+        if (t >= 0.0)
+        {
+            float3 hit_pos = ray_origin + (ray_dir * t);
+            float3 n = fast::normalize(hit_pos);
+            float cr = cos(ubo.rotationPhase);
+            float sr = sin(ubo.rotationPhase);
+            float3 rotated = float3((n.x * cr) - (n.z * sr), n.y, (n.x * sr) + (n.z * cr));
+            float3 param_1 = (rotated * 8.0) + float3(ubo.seed);
+            float granules = fbm(param_1);
+            float3 param_2 = ((rotated * 2.5) + float3(ubo.seed)) + float3(5.0);
+            float patches = fbm(param_2);
+            float surface_brightness = (0.75 + (granules * 0.3499999940395355224609375)) + (patches * 0.25);
+            color = base_color * surface_brightness;
+            disk_alpha = 1.0;
+        }
+    }
+    float dist = length(uv) / r;
+    float glow = exp((-dist) * 3.0);
+    float angle_noise = fract(sin((precise::atan2(uv.y, uv.x) * 12.98980045318603515625) + ubo.seed) * 43758.546875);
+    float rim_flicker = 0.75 + (0.25 * angle_noise);
+    color += ((base_color * powr(glow, 4.0)) * 2.0);
+    color += (((base_color * glow) * rim_flicker) * (1.0 - disk_alpha));
+    color *= ubo.doppler;
+    color *= ubo.brightness;
+    float alpha = fast::max(disk_alpha, glow);
+    out.frag_color = float4(color, alpha);
+    return out;
+}
+

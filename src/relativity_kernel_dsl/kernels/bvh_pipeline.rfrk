@@ -1,0 +1,289 @@
+# Relativity kernel DSL -- BVH build + primary-ray traversal pipeline (item 2
+# prototype). Fixes the two real bugs an audit of the dormant GLSL BVH
+# library found (Relativity/src/relativity_sandbox/physics/fluids/grid/): every "build"
+# kernel there computes the Karras prefix-length metric and then discards
+# it in favor of a degenerate parent=i-1 chain, and every radix sort
+# reuses its own histogram as the scatter-rank counter (corrupting
+# offsets) with no parallel primitive-index permutation. This file
+# implements both correctly, feeding the one already-clean sub-chain in
+# that library (bounds_build -> escape_index_build -> stackless_traverse,
+# reauthored here rather than literally reused, same struct/algorithm).
+#
+# Scope (see the approved plan): one static scene, N<=256 spheres (single-
+# workgroup radix sort), primary-ray visibility only. Node layout: leaves
+# at global indices [0, n-1], internal nodes at [n, 2n-2] (internal node 0
+# is always the root of a Karras binary-radix tree, so the root's global
+# index is always exactly `n`).
+#
+# The Karras split search here uses a straightforward LINEAR scan rather
+# than the paper's O(log n) exponential-search-then-binary-search
+# optimization -- both rely on the same monotonicity property of the
+# prefix-length metric (once a candidate position fails the ">"" test,
+# every farther position fails it too), so a plain bounded linear scan is
+# equally correct, just O(n) per node instead of O(log n) -- entirely
+# fine at this scope's N<=256 scale, and much easier to verify by hand
+# than re-deriving the paper's exact doubling/halving loop from memory.
+
+field positions: vec4[]        # xyz = center, w = radius
+field morton: u32[]
+field morton_tmp: u32[]
+field prim_index: i32[]
+field prim_index_tmp: i32[]
+field hist: u32[]
+field prefix: u32[]
+field bvh_bmin: vec3[]
+field bvh_bmax: vec3[]
+field bvh_left: i32[]
+field bvh_right: i32[]
+field bvh_escape: i32[]
+
+
+# ---------------------------------------------------------------------
+# Scene bounds (a real `fold` parallel reduction, not a host-side pass)
+# ---------------------------------------------------------------------
+
+kernel scene_bounds(n: i32):
+    fold bounds_min: vec3 = vec3(1e30, 1e30, 1e30)
+    fold bounds_max: vec3 = vec3(-1e30, -1e30, -1e30)
+    for i in range(n):
+        bounds_min = min(bounds_min, positions[i].xyz - positions[i].w)
+        bounds_max = max(bounds_max, positions[i].xyz + positions[i].w)
+
+
+# ---------------------------------------------------------------------
+# Morton encoding
+# ---------------------------------------------------------------------
+
+func expand_bits(v: u32) -> u32:
+    v = (v * 0x00010001) & 0xFF0000FF
+    v = (v * 0x00000101) & 0x0F00F00F
+    v = (v * 0x00000011) & 0xC30C30C3
+    v = (v * 0x00000005) & 0x49249249
+    return v
+
+kernel morton_encode(n: i32, scene_min: vec3, scene_scale: f32):
+    for i in range(n):
+        p = (positions[i].xyz - scene_min) * scene_scale
+        x = u32(clamp(p.x, 0.0, 1023.0))
+        y = u32(clamp(p.y, 0.0, 1023.0))
+        z = u32(clamp(p.z, 0.0, 1023.0))
+        morton[i] = (expand_bits(x) << 2) | (expand_bits(y) << 1) | expand_bits(z)
+        prim_index[i] = i32(i)
+
+
+# ---------------------------------------------------------------------
+# Radix sort (fixed: a real zero-initialized histogram/prefix-sum, and a
+# parallel prim_index permutation) -- 4 passes of 8 bits each, host
+# ping-pongs code/idx <-> code_tmp/idx_tmp between passes.
+#
+# Real bug found and fixed while verifying this against a numpy
+# reference at N=64 (not just N=8, where it happened to look fine):
+# LSD radix sort's correctness depends on every pass being a STABLE sort
+# of its own digit -- ties (equal digit values) must keep their relative
+# order from before the pass. An earlier version computed each element's
+# rank-within-its-bucket via atomic_add on a per-key counter, processed
+# in parallel across all N threads -- but GPU threads execute in an
+# unspecified order unrelated to element index, so ties got scattered in
+# whatever order their atomics happened to win the race, not original
+# index order. That's a real, silent instability: each individual pass
+# still looked "locally sorted by its own byte" (an easy but insufficient
+# check), yet the FINAL 32-bit result came out with real inversions.
+# Fixed by doing the whole pass -- histogram, exclusive prefix sum, AND
+# scatter -- serially in a single thread: at this pipeline's N<=256
+# scope a few hundred serial iterations is negligible cost, and
+# processing elements 0..n-1 in strict order with a plain (non-atomic)
+# per-key insertion cursor guarantees stability by construction, not by
+# hoping atomics happen to race in index order.
+# ---------------------------------------------------------------------
+
+kernel radix_sort_pass(one: i32, n: i32, shift: i32):
+    for t in range(one):
+        for b in range(256):
+            hist[b] = 0u
+        for i in range(n):
+            key = (morton[i] >> u32(shift)) & 0xFF
+            hist[key] = hist[key] + 1u
+        sum = 0u
+        for b in range(256):
+            prefix[b] = sum
+            sum = sum + hist[b]
+        for i in range(n):
+            key = (morton[i] >> u32(shift)) & 0xFF
+            r = prefix[key]
+            prefix[key] = r + 1u
+            morton_tmp[r] = morton[i]
+            prim_index_tmp[r] = prim_index[i]
+
+
+# ---------------------------------------------------------------------
+# Karras binary-radix-tree build
+# ---------------------------------------------------------------------
+
+func delta(a: i32, b: i32, n: i32) -> i32:
+    result = -1
+    if b >= 0 and b < n:
+        ca = morton[a]
+        cb = morton[b]
+        x = ca ^ cb
+        result = 32
+        if x != 0:
+            result = i32(31u - u32(findMSB(x)))
+    return result
+
+kernel karras_build(n: i32, n_internal: i32):
+    for i in range(n_internal):
+        ii = i32(i)
+        d1 = delta(ii, ii + 1, n)
+        d2 = delta(ii, ii - 1, n)
+        dir = 1
+        if d2 > d1:
+            dir = -1
+        delta_min = delta(ii, ii - dir, n)
+
+        l = 0
+        for k in range(n):
+            candidate = l + 1
+            if delta(ii, ii + candidate * dir, n) > delta_min:
+                l = candidate
+
+        j = ii + l * dir
+        delta_node = delta(ii, j, n)
+
+        s = 0
+        for k in range(l):
+            candidate_s = s + 1
+            if delta(ii, ii + candidate_s * dir, n) > delta_node:
+                s = candidate_s
+
+        gamma = ii + s * dir
+        if dir < 0:
+            gamma = gamma - 1
+
+        lo = ii
+        hi = j
+        if j < ii:
+            lo = j
+            hi = ii
+
+        left_idx = n + gamma
+        if gamma == lo:
+            left_idx = gamma
+        right_idx = n + gamma + 1
+        if (gamma + 1) == hi:
+            right_idx = gamma + 1
+
+        node_idx = n + ii
+        bvh_left[node_idx] = left_idx
+        bvh_right[node_idx] = right_idx
+
+kernel init_leaves(n: i32):
+    for i in range(n):
+        bvh_left[i] = -1
+        bvh_right[i] = -1
+
+
+# ---------------------------------------------------------------------
+# Bounds + escape-index build (real sphere bounds via pos.xyz +/- pos.w,
+# not a fixed epsilon point-box; iterated host-side, see gpu_bvh_pipeline.py)
+# ---------------------------------------------------------------------
+
+kernel bounds_build_iter(n2: i32):
+    for i in range(n2):
+        if bvh_left[i] < 0:
+            p = positions[i].xyz
+            r = positions[i].w
+            bvh_bmin[i] = p - vec3(r, r, r)
+            bvh_bmax[i] = p + vec3(r, r, r)
+        else:
+            l = bvh_left[i]
+            rr = bvh_right[i]
+            bvh_bmin[i] = min(bvh_bmin[l], bvh_bmin[rr])
+            bvh_bmax[i] = max(bvh_bmax[l], bvh_bmax[rr])
+
+kernel escape_index_iter(n2: i32):
+    # Every node's escape comes ONLY from parent-to-child propagation
+    # (right child inherits the parent's own escape; left child escapes
+    # to its right sibling) -- the root is the sole exception, seeded to
+    # -1 by the host before the first iteration (see gpu_bvh_pipeline.py).
+    # NOTE: the original dormant library's `bvh_escape_index_build.comp`
+    # additionally special-cased leaves as `escape[i] = i+1`, which only
+    # makes sense for a depth-first-preorder node layout where "next
+    # array index" coincides with "next traversal node" -- not true for
+    # this pipeline's leaves-then-internals layout (or, at the tail of
+    # the array, not even reliably true for a preorder layout either).
+    # Leaves here get their escape purely as propagation TARGETS from
+    # their parent's own turn below, like any other node.
+    for i in range(n2):
+        if bvh_left[i] >= 0:
+            l = bvh_left[i]
+            rr = bvh_right[i]
+            bvh_escape[rr] = bvh_escape[i]
+            bvh_escape[l] = rr
+
+
+# ---------------------------------------------------------------------
+# Primary-ray traversal + real ray-sphere shading
+# ---------------------------------------------------------------------
+
+func hits_aabb(ro: vec3, rd: vec3, bmin: vec3, bmax: vec3) -> i32:
+    t1 = (bmin - ro) / rd
+    t2 = (bmax - ro) / rd
+    tmin_v = min(t1, t2)
+    tmax_v = max(t1, t2)
+    t_enter = max(max(tmin_v.x, tmin_v.y), tmin_v.z)
+    t_exit = min(min(tmax_v.x, tmax_v.y), tmax_v.z)
+    result = 0
+    if t_exit >= t_enter and t_exit > 0.0:
+        result = 1
+    return result
+
+func ray_sphere_t(ro: vec3, rd: vec3, center: vec3, radius: f32) -> f32:
+    oc = ro - center
+    b = dot(oc, rd)
+    c = dot(oc, oc) - radius * radius
+    disc = b * b - c
+    result = -1.0
+    if disc >= 0.0:
+        sq = sqrt(disc)
+        t0 = -b - sq
+        t1 = -b + sq
+        if t0 >= 0.0:
+            result = t0
+        else:
+            if t1 >= 0.0:
+                result = t1
+    return result
+
+shader raytrace(n2: i32, root: i32, cam_pos: vec3, cam_forward: vec3, cam_right: vec3,
+                 cam_up: vec3, aspect: f32, tan_half_fov: f32, width: f32, height: f32):
+    u = (frag_coord.x / width) * 2.0 - 1.0
+    v = 1.0 - (frag_coord.y / height) * 2.0
+    px = u * aspect * tan_half_fov
+    py = v * tan_half_fov
+    ray_dir = normalize(cam_forward + cam_right * px + cam_up * py)
+
+    idx = root
+    closest_t = 1e30
+    hit_color = vec3(0.02, 0.02, 0.05)
+
+    for k in range(n2):
+        if idx >= 0:
+            bmin = bvh_bmin[idx]
+            bmax = bvh_bmax[idx]
+            is_hit = hits_aabb(cam_pos, ray_dir, bmin, bmax)
+            if is_hit == 1:
+                if bvh_left[idx] < 0:
+                    t = ray_sphere_t(cam_pos, ray_dir, positions[idx].xyz, positions[idx].w)
+                    if t >= 0.0:
+                        if t < closest_t:
+                            closest_t = t
+                            hit_pos = cam_pos + ray_dir * t
+                            hit_normal = normalize(hit_pos - positions[idx].xyz)
+                            hit_color = hit_normal * 0.5 + vec3(0.5, 0.5, 0.5)
+                    idx = bvh_escape[idx]
+                else:
+                    idx = bvh_left[idx]
+            else:
+                idx = bvh_escape[idx]
+
+    out_color = hit_color

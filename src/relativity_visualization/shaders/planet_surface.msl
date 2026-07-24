@@ -1,0 +1,260 @@
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct UBO
+{
+    float lightX;
+    float lightY;
+    float lightZ;
+    float rotationPhase;
+    float paletteLowR;
+    float paletteLowG;
+    float paletteLowB;
+    float paletteHighR;
+    float paletteHighG;
+    float paletteHighB;
+    float bandStrength;
+    float turbulence;
+    float seed;
+    float kindGasGiant;
+    float terrainStrength;
+    float earthlike;
+    float asteroidMode;
+};
+
+struct main0_out
+{
+    float4 frag_color [[color(0)]];
+};
+
+struct main0_in
+{
+    float2 v_uv [[user(locn0)]];
+};
+
+static inline __attribute__((always_inline))
+float hash3(thread float3& p)
+{
+    p = fract((p * 0.31830990314483642578125) + float3(0.100000001490116119384765625, 0.20000000298023223876953125, 0.300000011920928955078125));
+    p *= 17.0;
+    return fract(((p.x * p.y) * p.z) * ((p.x + p.y) + p.z));
+}
+
+static inline __attribute__((always_inline))
+float noise3d(thread const float3& p)
+{
+    float3 i = floor(p);
+    float3 f = fract(p);
+    float3 u = (f * f) * (float3(3.0) - (f * 2.0));
+    float3 param = i + float3(0.0);
+    float _93 = hash3(param);
+    float n000 = _93;
+    float3 param_1 = i + float3(1.0, 0.0, 0.0);
+    float _100 = hash3(param_1);
+    float n100 = _100;
+    float3 param_2 = i + float3(0.0, 1.0, 0.0);
+    float _106 = hash3(param_2);
+    float n010 = _106;
+    float3 param_3 = i + float3(1.0, 1.0, 0.0);
+    float _112 = hash3(param_3);
+    float n110 = _112;
+    float3 param_4 = i + float3(0.0, 0.0, 1.0);
+    float _118 = hash3(param_4);
+    float n001 = _118;
+    float3 param_5 = i + float3(1.0, 0.0, 1.0);
+    float _124 = hash3(param_5);
+    float n101 = _124;
+    float3 param_6 = i + float3(0.0, 1.0, 1.0);
+    float _130 = hash3(param_6);
+    float n011 = _130;
+    float3 param_7 = i + float3(1.0);
+    float _136 = hash3(param_7);
+    float n111 = _136;
+    float nx00 = mix(n000, n100, u.x);
+    float nx10 = mix(n010, n110, u.x);
+    float nx01 = mix(n001, n101, u.x);
+    float nx11 = mix(n011, n111, u.x);
+    float nxy0 = mix(nx00, nx10, u.y);
+    float nxy1 = mix(nx01, nx11, u.y);
+    return mix(nxy0, nxy1, u.z);
+}
+
+static inline __attribute__((always_inline))
+float fbm(thread const float3& p)
+{
+    float value = 0.0;
+    float amp = 0.5;
+    float freq = 1.0;
+    for (int i = 0; i < 5; i++)
+    {
+        float3 param = p * freq;
+        value += (amp * noise3d(param));
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    return value;
+}
+
+static inline __attribute__((always_inline))
+float heightAt(thread const float3& dir, constant UBO& ubo)
+{
+    float3 param = (dir * 3.0) + float3(ubo.seed);
+    float base = fbm(param);
+    float3 param_1 = (dir * 6.0) + float3(ubo.seed);
+    float n = noise3d(param_1);
+    float ridged = 1.0 - abs((n * 2.0) - 1.0);
+    float billow = abs((n * 2.0) - 1.0);
+    return ((base * 0.60000002384185791015625) + (ridged * 0.300000011920928955078125)) - (billow * 0.100000001490116119384765625);
+}
+
+static inline __attribute__((always_inline))
+float3 rotate_y(thread const float3& v, thread const float& cr, thread const float& sr)
+{
+    return float3((v.x * cr) - (v.z * sr), v.y, (v.x * sr) + (v.z * cr));
+}
+
+static inline __attribute__((always_inline))
+float3 asteroidRock(thread const float3& p, thread const float3& n, constant UBO& ubo)
+{
+    float3 w = n * n;
+    w /= float3((w.x + w.y) + w.z);
+    float freq = 3.0;
+    float3 param = ((float3(p.y, p.z, 0.0) * freq) + float3(ubo.seed)) + float3(11.0);
+    float nx = fbm(param);
+    float3 param_1 = ((float3(p.z, p.x, 0.0) * freq) + float3(ubo.seed)) + float3(23.0);
+    float ny = fbm(param_1);
+    float3 param_2 = ((float3(p.x, p.y, 0.0) * freq) + float3(ubo.seed)) + float3(37.0);
+    float nz = fbm(param_2);
+    float blended = ((nx * w.x) + (ny * w.y)) + (nz * w.z);
+    float3 low = float3(ubo.paletteLowR, ubo.paletteLowG, ubo.paletteLowB);
+    float3 high = float3(ubo.paletteHighR, ubo.paletteHighG, ubo.paletteHighB);
+    float3 mid = mix(low, high, float3(0.5));
+    float3 _396;
+    if (blended < 0.5)
+    {
+        _396 = mix(low, mid, float3(blended * 2.0));
+    }
+    else
+    {
+        _396 = mix(mid, high, float3((blended - 0.5) * 2.0));
+    }
+    float3 color = _396;
+    float3 param_3 = ((float3(p.y, p.z, 0.0) * 14.0) + float3(ubo.seed)) + float3(71.0);
+    float speckle_x = fbm(param_3);
+    float3 param_4 = ((float3(p.z, p.x, 0.0) * 14.0) + float3(ubo.seed)) + float3(83.0);
+    float speckle_y = fbm(param_4);
+    float3 param_5 = ((float3(p.x, p.y, 0.0) * 14.0) + float3(ubo.seed)) + float3(97.0);
+    float speckle_z = fbm(param_5);
+    float speckle = ((speckle_x * w.x) + (speckle_y * w.y)) + (speckle_z * w.z);
+    color *= (0.85000002384185791015625 + (0.300000011920928955078125 * speckle));
+    return color;
+}
+
+fragment main0_out main0(main0_in in [[stage_in]], constant UBO& ubo [[buffer(0)]])
+{
+    main0_out out = {};
+    float2 uv = (in.v_uv * 2.0) - float2(1.0);
+    float3 ray_origin = float3(0.0, 0.0, -3.0);
+    float3 ray_dir = fast::normalize(float3(uv, 1.5));
+    float b = dot(ray_origin, ray_dir);
+    float c = dot(ray_origin, ray_origin) - 1.0;
+    float disc = (b * b) - c;
+    if (disc < 0.0)
+    {
+        out.frag_color = float4(0.0);
+        return out;
+    }
+    float t = (-b) - sqrt(disc);
+    if (t < 0.0)
+    {
+        out.frag_color = float4(0.0);
+        return out;
+    }
+    float3 hit_pos = ray_origin + (ray_dir * t);
+    float3 n = fast::normalize(hit_pos);
+    float cr = cos(ubo.rotationPhase);
+    float sr = sin(ubo.rotationPhase);
+    float3 rotated = float3((n.x * cr) - (n.z * sr), n.y, (n.x * sr) + (n.z * cr));
+    float3 light_dir = fast::normalize(float3(ubo.lightX, ubo.lightY, ubo.lightZ));
+    float3 bumped_normal = n;
+    if (ubo.terrainStrength > 0.0)
+    {
+        float3 up_hint = select(float3(1.0, 0.0, 0.0), float3(0.0, 1.0, 0.0), bool3(abs(n.y) < 0.9900000095367431640625));
+        float3 tangent = fast::normalize(cross(up_hint, n));
+        float3 bitangent = cross(n, tangent);
+        float eps = 0.0500000007450580596923828125;
+        float3 param = rotated;
+        float h0 = heightAt(param, ubo);
+        float3 param_1 = fast::normalize(n + (tangent * eps));
+        float param_2 = cr;
+        float param_3 = sr;
+        float3 param_4 = rotate_y(param_1, param_2, param_3);
+        float hT = heightAt(param_4, ubo);
+        float3 param_5 = fast::normalize(n + (bitangent * eps));
+        float param_6 = cr;
+        float param_7 = sr;
+        float3 param_8 = rotate_y(param_5, param_6, param_7);
+        float hB = heightAt(param_8, ubo);
+        float3 bump = ((tangent * (hT - h0)) + (bitangent * (hB - h0))) * (ubo.terrainStrength / eps);
+        bumped_normal = fast::normalize(n - bump);
+    }
+    float diffuse = fast::clamp(dot(bumped_normal, light_dir), 0.07999999821186065673828125, 1.0);
+    float3 param_9 = (rotated * 3.0) + float3(ubo.seed);
+    float turb = fbm(param_9);
+    float3 low = float3(ubo.paletteLowR, ubo.paletteLowG, ubo.paletteLowB);
+    float3 high = float3(ubo.paletteHighR, ubo.paletteHighG, ubo.paletteHighB);
+    float3 surface_color;
+    if (ubo.kindGasGiant > 0.5)
+    {
+        float band = (rotated.y * 3.0) + (((turb - 0.5) * ubo.turbulence) * 4.0);
+        float mix_factor = fast::clamp(0.5 + (0.5 * sin(band * 3.141590118408203125)), 0.0, 1.0);
+        mix_factor = fast::clamp(mix_factor + (((turb - 0.5) * ubo.bandStrength) * 0.4000000059604644775390625), 0.0, 1.0);
+        surface_color = mix(low, high, float3(mix_factor));
+    }
+    else
+    {
+        float3 param_10 = rotated;
+        float alt = heightAt(param_10, ubo);
+        float3 ice = float3(0.920000016689300537109375, 0.949999988079071044921875, 1.0);
+        if (ubo.asteroidMode > 0.5)
+        {
+            float3 param_11 = rotated;
+            float3 param_12 = bumped_normal;
+            surface_color = asteroidRock(param_11, param_12, ubo);
+        }
+        else
+        {
+            if (ubo.earthlike > 0.5)
+            {
+                float3 water_deep = low;
+                float3 water_surface = mix(low, float3(0.0500000007450580596923828125, 0.25, 0.4000000059604644775390625), float3(0.5));
+                float3 sand = float3(0.819999992847442626953125, 0.75, 0.550000011920928955078125);
+                float3 vegetation = float3(0.1500000059604644775390625, 0.3499999940395355224609375, 0.119999997317790985107421875);
+                float3 rock = high;
+                surface_color = mix(water_deep, water_surface, float3(smoothstep(0.0, 0.4000000059604644775390625, alt)));
+                surface_color = mix(surface_color, sand, float3(smoothstep(0.4000000059604644775390625, 0.430000007152557373046875, alt)));
+                surface_color = mix(surface_color, vegetation, float3(smoothstep(0.439999997615814208984375, 0.4699999988079071044921875, alt)));
+                surface_color = mix(surface_color, rock, float3(smoothstep(0.519999980926513671875, 0.550000011920928955078125, alt)));
+                surface_color = mix(surface_color, ice, float3(smoothstep(0.60000002384185791015625, 0.62999999523162841796875, alt)));
+            }
+            else
+            {
+                surface_color = mix(low, high, float3(smoothstep(0.100000001490116119384765625, 0.60000002384185791015625, alt)));
+            }
+        }
+        if (ubo.asteroidMode <= 0.5)
+        {
+            float polar = powr(abs(rotated.y), 8.0);
+            surface_color = mix(surface_color, ice, float3(fast::clamp(polar - 0.1500000059604644775390625, 0.0, 1.0) * 0.85000002384185791015625));
+        }
+    }
+    float rim = powr(1.0 - fast::clamp(dot(n, -ray_dir), 0.0, 1.0), 3.0);
+    float3 color = (surface_color * diffuse) + float3(rim * 0.1500000059604644775390625);
+    out.frag_color = float4(color, 1.0);
+    return out;
+}
+

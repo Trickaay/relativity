@@ -1,0 +1,79 @@
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct UBO
+{
+    float innerRadius;
+    float outerRadius;
+    float temperature;
+    float doppler;
+    float brightness;
+};
+
+struct main0_out
+{
+    float4 frag_color [[color(0)]];
+};
+
+struct main0_in
+{
+    float2 v_uv [[user(locn0)]];
+};
+
+static inline __attribute__((always_inline))
+float3 blackbody(thread const float& T)
+{
+    float t = fast::clamp(T / 40000.0, 0.0, 1.0);
+    float3 cool = float3(1.0, 0.3499999940395355224609375, 0.100000001490116119384765625);
+    float3 mid = float3(1.0, 0.949999988079071044921875, 0.85000002384185791015625);
+    float3 hot = float3(0.64999997615814208984375, 0.75, 1.0);
+    float3 _37;
+    if (t < 0.5)
+    {
+        _37 = mix(cool, mid, float3(t * 2.0));
+    }
+    else
+    {
+        _37 = mix(mid, hot, float3((t - 0.5) * 2.0));
+    }
+    return _37;
+}
+
+fragment main0_out main0(main0_in in [[stage_in]], constant UBO& ubo [[buffer(0)]])
+{
+    main0_out out = {};
+    float2 uv = (in.v_uv * 2.0) - float2(1.0);
+    float r = length(uv);
+    bool _79 = r < ubo.innerRadius;
+    bool _88;
+    if (!_79)
+    {
+        _88 = r > ubo.outerRadius;
+    }
+    else
+    {
+        _88 = _79;
+    }
+    if (_88)
+    {
+        out.frag_color = float4(0.0);
+        return out;
+    }
+    float t = mix(ubo.temperature * 2.0, ubo.temperature * 0.20000000298023223876953125, (r - ubo.innerRadius) / (ubo.outerRadius - ubo.innerRadius));
+    float param = t;
+    float3 color = blackbody(param);
+    float phase = uv.x / fast::max(r, 9.9999997473787516355514526367188e-05);
+    float side_doppler = mix(1.0 / ubo.doppler, ubo.doppler, (phase + 1.0) * 0.5);
+    float side_brightness = mix(1.0 / ubo.brightness, ubo.brightness, (phase + 1.0) * 0.5);
+    color.x *= side_doppler;
+    color.z /= side_doppler;
+    color *= side_brightness;
+    float glow = exp((-abs(r - ubo.innerRadius)) * 5.0);
+    out.frag_color = float4(color * glow, glow);
+    return out;
+}
+

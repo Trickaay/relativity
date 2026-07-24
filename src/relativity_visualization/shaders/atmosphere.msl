@@ -1,0 +1,164 @@
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct UBO
+{
+    float sunDirX;
+    float sunDirY;
+    float sunDirZ;
+    float planetRadius;
+    float atmosphereRadius;
+};
+
+struct main0_out
+{
+    float4 frag_color [[color(0)]];
+};
+
+struct main0_in
+{
+    float2 v_uv [[user(locn0)]];
+};
+
+static inline __attribute__((always_inline))
+float2 ray_vs_sphere(thread const float3& p, thread const float3& dir, thread const float& r)
+{
+    float b = dot(p, dir);
+    float c = dot(p, p) - (r * r);
+    float d = (b * b) - c;
+    if (d < 0.0)
+    {
+        return float2(10000.0, -10000.0);
+    }
+    d = sqrt(d);
+    return float2((-b) - d, (-b) + d);
+}
+
+static inline __attribute__((always_inline))
+float density(thread const float3& p, thread const float& ph, constant UBO& ubo)
+{
+    float thickness = fast::max(ubo.atmosphereRadius - ubo.planetRadius, 9.9999997473787516355514526367188e-05);
+    return exp(((-fast::max(length(p) - ubo.planetRadius, 0.0)) / thickness) / ph);
+}
+
+static inline __attribute__((always_inline))
+float optic(thread const float3& p, thread const float3& q, thread const float& ph, constant UBO& ubo)
+{
+    float3 s = (q - p) / float3(8.0);
+    float3 v = p + (s * 0.5);
+    float sum = 0.0;
+    for (int i = 0; i < 8; i++)
+    {
+        float3 param = v;
+        float param_1 = ph;
+        sum += density(param, param_1, ubo);
+        v += s;
+    }
+    sum *= length(s);
+    return sum;
+}
+
+static inline __attribute__((always_inline))
+float phase_ray(thread const float& cc)
+{
+    return 0.0596831031143665313720703125 * (1.0 + cc);
+}
+
+static inline __attribute__((always_inline))
+float phase_mie(thread const float& g, thread const float& c, thread const float& cc)
+{
+    float gg = g * g;
+    float a = (1.0 - gg) * (1.0 + cc);
+    float b = (1.0 + gg) - ((2.0 * g) * c);
+    b *= sqrt(b);
+    b *= (2.0 + gg);
+    return (0.119366206228733062744140625 * a) / b;
+}
+
+static inline __attribute__((always_inline))
+float3 in_scatter(thread const float3& o, thread const float3& dir, thread const float2& e, thread const float3& l, constant UBO& ubo)
+{
+    float3 sum_ray = float3(0.0);
+    float3 sum_mie = float3(0.0);
+    float n_ray0 = 0.0;
+    float n_mie0 = 0.0;
+    float len = (e.y - e.x) / 80.0;
+    float3 s = dir * len;
+    float3 v = o + (dir * (e.x + (len * 0.5)));
+    for (int i = 0; i < 80; i++)
+    {
+        float3 param = v;
+        float param_1 = 0.0500000007450580596923828125;
+        float d_ray = density(param, param_1, ubo) * len;
+        float3 param_2 = v;
+        float param_3 = 0.0199999995529651641845703125;
+        float d_mie = density(param_2, param_3, ubo) * len;
+        n_ray0 += d_ray;
+        n_mie0 += d_mie;
+        float3 param_4 = v;
+        float3 param_5 = l;
+        float param_6 = ubo.atmosphereRadius;
+        float2 f = ray_vs_sphere(param_4, param_5, param_6);
+        float3 u = v + (l * f.y);
+        float3 param_7 = v;
+        float3 param_8 = u;
+        float param_9 = 0.0500000007450580596923828125;
+        float n_ray1 = optic(param_7, param_8, param_9, ubo);
+        float3 param_10 = v;
+        float3 param_11 = u;
+        float param_12 = 0.0199999995529651641845703125;
+        float n_mie1 = optic(param_10, param_11, param_12, ubo);
+        float3 att = exp((float3(3.7999999523162841796875, 13.5, 33.09999847412109375) * (-(n_ray0 + n_ray1))) - float3(((n_mie0 + n_mie1) * 21.0) * 1.10000002384185791015625));
+        sum_ray += (att * d_ray);
+        sum_mie += (att * d_mie);
+        v += s;
+    }
+    float c = dot(dir, -l);
+    float cc = c * c;
+    float param_13 = cc;
+    float param_14 = -0.7799999713897705078125;
+    float param_15 = c;
+    float param_16 = cc;
+    float3 scatter = ((sum_ray * float3(3.7999999523162841796875, 13.5, 33.09999847412109375)) * phase_ray(param_13)) + ((sum_mie * 21.0) * phase_mie(param_14, param_15, param_16));
+    return scatter * 10.0;
+}
+
+fragment main0_out main0(main0_in in [[stage_in]], constant UBO& ubo [[buffer(0)]])
+{
+    main0_out out = {};
+    float2 uv = (in.v_uv * 2.0) - float2(1.0);
+    float3 ray_origin = float3(0.0, 0.0, -3.0);
+    float3 ray_dir = fast::normalize(float3(uv, 1.5));
+    float3 param = ray_origin;
+    float3 param_1 = ray_dir;
+    float param_2 = ubo.atmosphereRadius;
+    float2 e = ray_vs_sphere(param, param_1, param_2);
+    if (e.x > e.y)
+    {
+        out.frag_color = float4(0.0);
+        return out;
+    }
+    e.x = fast::max(e.x, 0.0);
+    float3 param_3 = ray_origin;
+    float3 param_4 = ray_dir;
+    float param_5 = ubo.planetRadius;
+    float2 f = ray_vs_sphere(param_3, param_4, param_5);
+    if (f.x > 0.0)
+    {
+        e.y = fast::min(e.y, f.x);
+    }
+    float3 sunDir = fast::normalize(float3(ubo.sunDirX, ubo.sunDirY, ubo.sunDirZ));
+    float3 param_6 = ray_origin;
+    float3 param_7 = ray_dir;
+    float2 param_8 = e;
+    float3 param_9 = sunDir;
+    float3 scatter = in_scatter(param_6, param_7, param_8, param_9, ubo);
+    float alpha = fast::clamp(length(scatter) * 1.5, 0.0, 1.0);
+    out.frag_color = float4(scatter, alpha);
+    return out;
+}
+
