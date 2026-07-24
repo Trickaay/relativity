@@ -28,7 +28,7 @@ layout(set = 3, binding = 0) uniform UBO {
 } ubo;
 
 // The original salvaged formula (1.2929*pow(t,-0.133) etc, t=T/10000)
-// was empirically confirmed this session to saturate to solid white
+// was empirically confirmed to saturate to solid white
 // across the entire realistic temperature range for both accretion
 // disks and stars (a few thousand to tens of thousands of Kelvin) --
 // two renders at 3000K and 15000K produced byte-identical mean color.

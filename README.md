@@ -63,4 +63,3 @@ SDL_VIDEODRIVER=cocoa python -m pytest tests/
 ## More context
 
 - [`docs/bug_log.md`](docs/bug_log.md) — real bugs found building this, written up in detail: what broke, why, how it was fixed, and why the fix works.
-- [`docs/pygame_ce_pitch_draft.md`](docs/pygame_ce_pitch_draft.md) — draft notes toward a pygame-ce community discussion about this.

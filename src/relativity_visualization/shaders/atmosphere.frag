@@ -2,7 +2,7 @@
 
 // Real ray-marched Rayleigh + Mie atmospheric scattering, replacing this
 // file's earlier single-sample approximation (prompted by two reference
-// shaders the user found -- David A Roberts' "Humanity" and Reinder
+// shaders I found -- David A Roberts' "Humanity" and Reinder
 // Nijhoff's "Planet" -- both credit the exact same GLtracy scattering
 // technique this file's own header already traced its lineage to,
 // confirming it as the right one to finish porting rather than the
